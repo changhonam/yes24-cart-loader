@@ -19,6 +19,28 @@
 
   const QTY_CLICK_DELAY_MS = 80;
 
+  const OPTION_CONTAINER_SELECTORS = [
+    '.gd_selRow',
+    '#selPartBookWrap',
+    '#gd_spring',
+    '.gd_selGrpWrap',
+    '[id^="gd_selGrpWrap"]',
+    '.opt_selBox',
+    '.opt_area'
+  ];
+  const OPTION_ITEM_SELECTORS = [
+    'li[data-goodsno]',
+    'li[data-partbookvalue]:not([data-partbookvalue="99"])',
+    'li[data-value]',
+    'li'
+  ];
+  const NEGATIVE_OPTION_PATTERNS = [/안\s*함/, /없음/, /미적용/, /선택\s*안\s*함/];
+  const PLACEHOLDER_PATTERNS = [/선택해\s*주세요/, /선택하세요/, /옵션을\s*선택/];
+  const OPTION_DROPDOWN_OPEN_WAIT_MS = 150;
+  const OPTION_SELECT_WAIT_MS = 400;
+  const OPTION_LABEL_MAX_LEN = 40;
+  const OPTION_POPUP_PHRASES = ['옵션을 선택', '옵션을 먼저 선택', '필수 옵션'];
+
   const SUCCESS_PHRASES = [
     '카트에 담겼습니다',
     '장바구니에 담겼습니다',
@@ -85,6 +107,110 @@
 
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
+  }
+
+  function textOf(el) {
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function truncateLabel(text) {
+    if (text.length <= OPTION_LABEL_MAX_LEN) return text;
+    return text.slice(0, OPTION_LABEL_MAX_LEN) + '...';
+  }
+
+  function isNegativeOption(text) {
+    return NEGATIVE_OPTION_PATTERNS.some(r => r.test(text));
+  }
+
+  function isPlaceholderOption(text) {
+    return PLACEHOLDER_PATTERNS.some(r => r.test(text));
+  }
+
+  function pickSelectOptionIndex(sel) {
+    let firstValid = -1;
+    for (let i = 0; i < sel.options.length; i++) {
+      const opt = sel.options[i];
+      const t = (opt.textContent || '').trim();
+      if (isPlaceholderOption(t) || !opt.value) continue;
+      if (isNegativeOption(t)) return i;
+      if (firstValid === -1) firstValid = i;
+    }
+    return firstValid;
+  }
+
+  function pickListItem(items) {
+    const valid = items.filter(el => !isPlaceholderOption(textOf(el)));
+    const neg = valid.find(el => isNegativeOption(textOf(el)));
+    return neg || valid[0] || null;
+  }
+
+  async function ensureDropdownOpen(container) {
+    const row = (container.classList && container.classList.contains('gd_selRow'))
+      ? container
+      : (container.closest && container.closest('.gd_selRow'));
+    if (!row) return false;
+    const dt = row.querySelector('dt');
+    const dd = row.querySelector('dd');
+    if (!dt || !dd) return false;
+    const style = dd.getAttribute('style') || '';
+    const hidden = /display\s*:\s*none/i.test(style) || dd.offsetParent === null;
+    if (!hidden) return false;
+    const clickable = dt.querySelector('a') || dt;
+    try { clickable.click(); } catch (e) {}
+    await sleep(OPTION_DROPDOWN_OPEN_WAIT_MS);
+    return true;
+  }
+
+  function selectFirstDefaultOption(container) {
+    const sel = container.matches && container.matches('select')
+      ? container
+      : container.querySelector('select');
+    if (sel && sel.options && sel.options.length > 0) {
+      const chosenIdx = pickSelectOptionIndex(sel);
+      if (chosenIdx >= 0) {
+        if (sel.selectedIndex !== chosenIdx) {
+          sel.selectedIndex = chosenIdx;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const label = truncateLabel((sel.options[chosenIdx].textContent || '').trim());
+        return { ok: true, label };
+      }
+    }
+    for (const itemSel of OPTION_ITEM_SELECTORS) {
+      const items = container.querySelectorAll(itemSel);
+      if (items.length === 0) continue;
+      const chosen = pickListItem(Array.from(items));
+      if (chosen) {
+        const clickTarget = chosen.querySelector('a') || chosen;
+        try { clickTarget.click(); } catch (e) {}
+        return { ok: true, label: truncateLabel(textOf(chosen)) };
+      }
+    }
+    return { ok: false };
+  }
+
+  async function selectAllOptions() {
+    const seen = new Set();
+    const selectedLabels = [];
+    let detectedAny = false;
+    let allSelected = true;
+    for (const sel of OPTION_CONTAINER_SELECTORS) {
+      const containers = document.querySelectorAll(sel);
+      for (const c of containers) {
+        if (seen.has(c)) continue;
+        const unit = (c.closest && c.closest('.gd_selRow')) || c;
+        if (seen.has(unit)) { seen.add(c); continue; }
+        seen.add(c);
+        seen.add(unit);
+        detectedAny = true;
+        await ensureDropdownOpen(unit);
+        const res = selectFirstDefaultOption(unit);
+        if (res.ok && res.label) selectedLabels.push(res.label);
+        if (!res.ok) allSelected = false;
+      }
+    }
+    if (detectedAny) await sleep(OPTION_SELECT_WAIT_MS);
+    return { detectedAny, allSelected, selectedLabels };
   }
 
   async function incrementQuantity(targetQty) {
@@ -159,6 +285,7 @@
       for (const p of SUCCESS_PHRASES) if (t.includes(p)) return { status: 'success', reason: '성공' };
       for (const p of ALREADY_PHRASES) if (t.includes(p)) return { status: 'success', reason: '이미 카트에 있음' };
       for (const p of SOLDOUT_PHRASES) if (t.includes(p)) return { status: 'error', reason: '품절된 상품' };
+      for (const p of OPTION_POPUP_PHRASES) if (t.includes(p)) return { status: 'error', reason: '옵션 자동 선택 실패(경고 팝업)' };
     }
     return null;
   }
@@ -181,16 +308,26 @@
           return;
         }
 
+        const optRes = await selectAllOptions();
+        if (optRes.detectedAny && !optRes.allSelected) {
+          resolve({ status: 'error', reason: '옵션 자동 선택 실패', selectedOptions: optRes.selectedLabels });
+          return;
+        }
+
         let appliedQty = 1;
         if (qty > 1) {
           const r = await incrementQuantity(qty);
           if (!r.ok) {
-            resolve({ status: 'error', reason: '수량 설정 실패: ' + r.reason });
+            const out = { status: 'error', reason: '수량 설정 실패: ' + r.reason };
+            if (optRes.selectedLabels.length > 0) out.selectedOptions = optRes.selectedLabels;
+            resolve(out);
             return;
           }
           appliedQty = r.applied;
           if (appliedQty !== qty) {
-            resolve({ status: 'error', reason: `수량 제한 초과 (요청 ${qty}, 반영 ${appliedQty})`, appliedQty });
+            const out = { status: 'error', reason: `수량 제한 초과 (요청 ${qty}, 반영 ${appliedQty})`, appliedQty };
+            if (optRes.selectedLabels.length > 0) out.selectedOptions = optRes.selectedLabels;
+            resolve(out);
             return;
           }
         }
@@ -198,12 +335,10 @@
         found.click();
 
         waitFor(() => detectResult(), RESULT_TIMEOUT_MS).then((res) => {
-          if (res) {
-            res.appliedQty = appliedQty;
-            resolve(res);
-          } else {
-            resolve({ status: 'error', reason: '결과 확인 시간 초과', appliedQty });
-          }
+          const base = res || { status: 'error', reason: '결과 확인 시간 초과' };
+          base.appliedQty = appliedQty;
+          if (optRes.selectedLabels.length > 0) base.selectedOptions = optRes.selectedLabels;
+          resolve(base);
         });
       });
     } catch (e) {

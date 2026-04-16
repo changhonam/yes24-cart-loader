@@ -91,10 +91,11 @@ popup.js ──{startBatchAdd, items, rawInput}──▶ service-worker.js
                     content-script.js:
                       location.hash에서 qty 파싱
                       waitFor(버튼 등장, 8초)
+                      → 옵션 감지 시 각 컨테이너의 기본 항목 자동 선택
                       → qty > 1이면 setQuantity(qty)
                       → 버튼 클릭
                       → waitFor(결과 레이어 감지, 6초)
-                      → return { status, reason, appliedQty }
+                      → return { status, reason, appliedQty, selectedOptions? }
                                           │
                     chrome.tabs.remove
                                           │
@@ -128,6 +129,7 @@ popup.js ◀──{progress, result}─── service-worker.js
     goodsId: string,
     requestedQty: number,
     appliedQty?: number,         // content-script가 실제 반영한 수량
+    selectedOptions?: string[],  // content-script가 자동 선택한 옵션 라벨 (제본/분철 등)
     status: 'success'|'error'|'skipped'|'cancelled',
     reason: string
   }],
@@ -193,17 +195,79 @@ function findCartButton() {
 - **이미 담김**: "이미 카트에 담긴", "이미 장바구니에 담긴" 등 → 성공 처리
 - **품절**: 레이어 내 "품절된 상품", "재고가 없", "일시품절"
 - **타임아웃**: 6초 내 결과 미감지 시 "결과 확인 시간 초과"
+- **옵션 미선택 경고**: 레이어 내 "옵션을 선택", "옵션을 먼저 선택", "필수 옵션" 감지 시 → "옵션 자동 선택 실패(경고 팝업)" (selector 추론이 빗나가 옵션 선택이 실제 반영되지 않은 경우의 명시적 피드백)
 
 ### 반환 형식
 ```javascript
 {
   status: 'success' | 'error' | 'skipped',
   reason: string,
-  goodsId: string,          // service-worker가 부여
-  requestedQty: number,     // service-worker가 부여 (item.qty)
-  appliedQty?: number       // content-script가 실제 반영한 수량 (qty > 1 케이스)
+  goodsId: string,            // service-worker가 부여
+  requestedQty: number,       // service-worker가 부여 (item.qty)
+  appliedQty?: number,        // content-script가 실제 반영한 수량 (qty > 1 케이스)
+  selectedOptions?: string[]  // 옵션 자동 선택 시 선택된 항목 라벨
 }
 ```
+
+### 상품 옵션 자동 선택 (제본/분철 등)
+
+일부 상품은 옵션(예: `.gd_selRow`에 렌더되는 "제본/분철")을 먼저 선택해야만 장바구니에 담긴다. Content Script는 담기 버튼 확보 직후 + 수량 설정 전에 `selectAllOptions()`를 호출하여 감지된 모든 옵션 행의 **기본 항목**을 자동 선택한다.
+
+**실제 DOM 구조** (제본/분철 기준):
+
+```html
+<div class="gd_selRow">
+  <dl>
+    <dt><a><span class="opt_txt">제본/분철 여부를 선택해주세요. (필수)</span></a></dt>
+    <dd style="display: none;">
+      <div class="gd_selOptGrp">
+        <ul id="selPartBookWrap">
+          <li data-partbookvalue="99"><!-- placeholder (data-goodsno 없음) --></li>
+          <li data-goodsno="..." data-partbookvalue="0" data-partbookname="제본/분철 안 함">
+            <a><span class="opt_txt">제본/분철 안 함</span></a>
+          </li>
+          <li data-goodsno="..." data-partbookvalue="1" data-partbookname="스프링 제본 (1권)">...</li>
+        </ul>
+      </div>
+    </dd>
+  </dl>
+</div>
+```
+
+**탐색 우선순위**:
+
+```javascript
+const OPTION_CONTAINER_SELECTORS = [
+  '.gd_selRow',            // 1차: Yes24 옵션 행 (확인된 구조)
+  '#selPartBookWrap',      // 제본/분철 UL 직접 참조
+  '#gd_spring',            // 보조 fallback
+  '.gd_selGrpWrap', '[id^="gd_selGrpWrap"]',
+  '.opt_selBox', '.opt_area'
+];
+const OPTION_ITEM_SELECTORS = [
+  'li[data-goodsno]',                                       // 실제 옵션만 (placeholder는 data-goodsno 없음)
+  'li[data-partbookvalue]:not([data-partbookvalue="99"])',  // 제본/분철 값 기반 fallback
+  'li[data-value]', 'li'
+];
+```
+
+**중복 방지**: `.gd_selRow` / `#selPartBookWrap`가 같은 행을 동시 매치하므로, 각 컨테이너의 `closest('.gd_selRow')`를 unit 키로 사용해 같은 행은 1회만 처리.
+
+**드롭다운 열기**: `<dd style="display:none">`로 접혀 있는 커스텀 드롭다운은 Yes24 핸들러 발화를 위해 먼저 `<dt>` 내 `<a>`를 `click()`한 뒤 150ms 대기 후 항목 `<li>`의 `<a>`를 클릭한다 (`ensureDropdownOpen()`).
+
+**기본 항목 선정 규칙** (행당 1개):
+
+1. `<select>` 요소가 있으면 해당 요소에서:
+   - placeholder/빈값(option.value 없음) 제외
+   - "안 함/없음/미적용/선택 안 함" 패턴 일치 → 우선 선택
+   - 없으면 DOM 순서상 첫 유효 option → `selectedIndex` 세팅 + `change` 이벤트 dispatch
+2. `<li>` 리스트형이면 (가시성 필터 없음 — 드롭다운이 접혀 있어도 OK):
+   - "선택해주세요/선택하세요/옵션을 선택" placeholder 텍스트 제외
+   - 음수 패턴 우선 → 없으면 DOM 순서상 첫 유효 `<li>` → 내부 `<a>` 우선 `click()` (없으면 `<li>` 자체)
+3. 행은 감지됐으나 어느 경로에서도 선택 실패 → `{ status: 'error', reason: '옵션 자동 선택 실패' }`
+4. 옵션 컨테이너가 전혀 없으면 기존 흐름 그대로 (옵션 없는 상품)
+
+선택 후 UI 반영을 위해 400ms 대기 후 수량 처리/담기 버튼 클릭으로 진행. 선택된 라벨은 `selectedOptions: string[]`으로 결과에 포함되어 Popup에서 `[옵션: 제본/분철 안 함]`과 같이 결과 라인 끝에 표시된다.
 
 ### 수량(qty) 처리
 

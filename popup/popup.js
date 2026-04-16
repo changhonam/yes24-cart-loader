@@ -112,7 +112,10 @@ function renderResults(items, results, currentIndex, running) {
     li.className = classFor(status);
     const qty = item.qty || 1;
     const label = item.goodsId || item.originalInput.slice(0, 20);
-    li.textContent = `${iconFor(status)} ${label} × ${qty}권 - ${reason}`;
+    let line = `${iconFor(status)} ${label} × ${qty}권 - ${reason}`;
+    const opts = results[idx] && results[idx].selectedOptions;
+    if (opts && opts.length > 0) line += ` [옵션: ${opts.join(' / ')}]`;
+    li.textContent = line;
     resultsEl.appendChild(li);
   });
 }
