@@ -63,11 +63,14 @@ popup.js ──{startBatchAdd, items}──▶ service-worker.js
                                           │
                     chrome.tabs.create({url, active: false})
                                           │
-                    chrome.tabs.onUpdated (status === 'complete')
+                    injectWithRetry: 300ms 간격으로 스크립트 주입 시도
+                    (페이지 로딩 완료를 기다리지 않고 즉시 시도)
                                           │
-                    chrome.scripting.executeScript(content-script.js)
-                                          │
-                    content-script.js: 버튼 클릭 → 결과 감지 → return
+                    content-script.js:
+                      waitFor(버튼 등장, 8초)
+                      → 버튼 클릭
+                      → waitFor(결과 레이어 감지, 6초)
+                      → return
                                           │
                     chrome.tabs.remove
                                           │
@@ -111,43 +114,48 @@ popup.js ◀──{progress, result}─── service-worker.js
 ### 장바구니 버튼 탐색 전략 (우선순위 순)
 
 ```javascript
+const CART_SELECTORS = ['#yDetailBtnCart', '.btnCart', '[data-action="addCart"]'];
+const CART_BUTTON_TEXTS = ['카트에 넣기', '장바구니 담기', '장바구니에 담기'];
+
 function findCartButton() {
   // 1. 알려진 ID/클래스 셀렉터
-  const selectors = [
-    '#yDetailBtnCart',
-    '.btnCart',
-    '[data-action="addCart"]'
-  ];
-  for (const sel of selectors) {
+  for (const sel of CART_SELECTORS) {
     const el = document.querySelector(sel);
     if (el) return el;
   }
   // 2. 텍스트 기반 탐색
-  const elements = document.querySelectorAll('a, button');
-  for (const el of elements) {
-    const text = el.textContent.trim();
-    if (text.includes('카트에 넣기') || text.includes('장바구니 담기')) {
-      return el;
+  const els = document.querySelectorAll('a, button');
+  for (const el of els) {
+    const text = (el.textContent || '').trim();
+    for (const kw of CART_BUTTON_TEXTS) {
+      if (text.includes(kw)) return el;
     }
   }
   return null;
 }
 ```
 
+페이지 로딩 직후 버튼이 아직 렌더링되지 않았을 수 있으므로, `waitFor(findCartButton, 8초)` 패턴으로 버튼 등장까지 200ms 간격 폴링한다.
+
 ### 에러 상태 감지
 
 | 상태 | 감지 방법 |
 |------|-----------|
-| 품절 | `document.querySelector('.soldout')` 또는 텍스트 "품절" 포함 요소 |
-| 404/없는 상품 | URL 리다이렉트, 페이지 타이틀/본문에 "찾을 수 없" 등 |
-| 미로그인 | `location.href`에 로그인 페이지 URL 포함 여부 |
+| 품절 | `.soldout`, `.gd_soldOut` 셀렉터 또는 `.gd_infoTop`, `.gd_titArea` 내 "품절/절판" 텍스트 |
+| 404/없는 상품 | 페이지 타이틀에 "찾을 수 없/존재하지 않/삭제된 상품" 또는 `.errorArea`, `.error_area`, `#errorPage` 셀렉터 |
+| 미로그인 | `location.href`에 `/Member/Login` 또는 `/Templates/FTLogin` 포함 여부 |
 
 ### 결과 감지 (버튼 클릭 후)
 
-클릭 후 최대 **8초** 동안 **300ms 간격**으로 DOM 폴링:
-- **성공 감지**: 장바구니 확인 레이어/모달 출현 (텍스트 "장바구니에 담았습니다", "장바구니 보기" 등)
-- **실패 감지**: 에러 메시지 레이어 출현
-- **타임아웃**: 8초 내 결과 미감지 시 "결과 확인 시간 초과"
+클릭 후 최대 **6초** 동안 **200ms 간격**으로 **보이는 팝업 레이어만** 폴링:
+
+대상 레이어 셀렉터: `.yesPopUp`, `.layerCart`, `.layer_cart`, `.pop_cart`, `#_layerPop_addCart`
+(`offsetParent !== null`인 보이는 요소만 검사)
+
+- **성공 감지**: 레이어 내 텍스트 매칭 — "카트에 담겼습니다", "장바구니에 담겼습니다", "카트에 담았습니다", "장바구니에 담았습니다", "장바구니에 넣었습니다", "장바구니에 추가되었습니다"
+- **이미 담김**: "이미 카트에 담긴", "이미 장바구니에 담긴" 등 → 성공 처리
+- **품절**: 레이어 내 "품절된 상품", "재고가 없", "일시품절"
+- **타임아웃**: 6초 내 결과 미감지 시 "결과 확인 시간 초과"
 
 ### 반환 형식
 ```javascript
@@ -164,8 +172,9 @@ function findCartButton() {
 
 | 대상 | 시간 | 초과 시 동작 |
 |------|------|-------------|
-| 탭 로딩 | 15초 | 탭 닫기, "페이지 로딩 시간 초과" |
-| Content Script 결과 | 8초 | "결과 확인 시간 초과" |
+| 스크립트 주입 재시도 (`injectWithRetry`) | 15초 (300ms 간격) | 탭 닫기, "페이지 로딩 시간 초과" |
+| 장바구니 버튼 대기 (`waitFor`) | 8초 (200ms 간격) | "장바구니 버튼을 찾을 수 없습니다" |
+| 결과 레이어 감지 (`waitFor`) | 6초 (200ms 간격) | "결과 확인 시간 초과" |
 
 ## 구현 순서
 
