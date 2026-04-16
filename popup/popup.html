@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Yes24 장바구니 일괄 담기</h1>
+
+  <label for="urls">도서 URL 입력 (한 줄에 하나):</label>
+  <textarea id="urls" placeholder="https://www.yes24.com/Product/Goods/59616782&#10;59616782" rows="6"></textarea>
+
+  <div class="counts" id="counts">인식된 도서: 0개 (유효: 0)</div>
+
+  <div class="actions">
+    <button id="start" disabled>담기 시작</button>
+    <button id="stop" disabled>중지</button>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap" hidden>
+    <div class="progress-text" id="progressText">진행: 0 / 0</div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  </div>
+
+  <ul id="results" class="results"></ul>
+
+  <div class="summary" id="summary" hidden></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

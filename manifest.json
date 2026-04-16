@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Yes24 장바구니 일괄 담기",
+  "description": "Yes24 도서 URL 목록을 장바구니에 자동으로 일괄 담습니다.",
+  "version": "0.1.0",
+  "permissions": ["scripting", "tabs", "storage"],
+  "host_permissions": ["*://www.yes24.com/*"],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Yes24 장바구니 일괄 담기"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js"
+  }
+}
