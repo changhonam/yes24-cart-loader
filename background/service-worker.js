@@ -9,7 +9,8 @@ let state = {
   aborted: false,
   items: [],
   currentIndex: 0,
-  results: []
+  results: [],
+  rawInput: ''
 };
 
 async function loadState() {
@@ -21,6 +22,12 @@ async function loadState() {
         state.running = false;
         state.aborted = true;
       }
+      if (Array.isArray(state.items)) {
+        state.items.forEach(i => {
+          if (!Number.isFinite(i.qty) || i.qty < 1) i.qty = 1;
+        });
+      }
+      if (typeof state.rawInput !== 'string') state.rawInput = '';
     }
   } catch (e) {}
 }
@@ -35,8 +42,10 @@ function sendToPopup(msg) {
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
-function buildUrl(goodsId) {
-  return `https://www.yes24.com/Product/Goods/${goodsId}`;
+function buildUrl(goodsId, qty) {
+  const base = `https://www.yes24.com/Product/Goods/${goodsId}`;
+  const n = Number.isFinite(qty) && qty >= 1 ? qty : 1;
+  return `${base}#qty=${n}`;
 }
 
 async function injectWithRetry(tabId, timeoutMs) {
@@ -73,7 +82,7 @@ function sleep(ms) {
 async function processItem(item) {
   let tab;
   try {
-    tab = await chrome.tabs.create({ url: buildUrl(item.goodsId), active: false });
+    tab = await chrome.tabs.create({ url: buildUrl(item.goodsId, item.qty), active: false });
   } catch (e) {
     return { status: 'error', reason: '탭 생성 실패' };
   }
@@ -83,13 +92,19 @@ async function processItem(item) {
   return result;
 }
 
-async function runBatch(items) {
+async function runBatch(rawItems, rawInput) {
+  const items = (rawItems || []).map(i => ({
+    goodsId: i.goodsId,
+    originalInput: i.originalInput,
+    qty: Number.isFinite(i.qty) && i.qty >= 1 ? i.qty : 1
+  }));
   state = {
     running: true,
     aborted: false,
     items,
     currentIndex: 0,
-    results: []
+    results: [],
+    rawInput: typeof rawInput === 'string' ? rawInput : ''
   };
   await saveState();
 
@@ -108,6 +123,7 @@ async function runBatch(items) {
     const item = items[i];
     const result = await processItem(item);
     result.goodsId = item.goodsId;
+    result.requestedQty = item.qty;
     state.results[i] = result;
     await saveState();
 
@@ -131,7 +147,12 @@ async function runBatch(items) {
 
   for (let i = 0; i < items.length; i++) {
     if (!state.results[i]) {
-      state.results[i] = { goodsId: items[i].goodsId, status: 'cancelled', reason: '취소됨' };
+      state.results[i] = {
+        goodsId: items[i].goodsId,
+        requestedQty: items[i].qty,
+        status: 'cancelled',
+        reason: '취소됨'
+      };
     }
   }
 
@@ -153,7 +174,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, reason: 'already running' });
       return false;
     }
-    runBatch(msg.items || []);
+    runBatch(msg.items || [], msg.rawInput);
     sendResponse({ ok: true });
     return false;
   }
